@@ -312,7 +312,7 @@ namespace vore {
 			std::string_view token = {};
 
 
-			soft_tokenise_iter & operator++() noexcept {  // TODO: test!
+			soft_tokenise_iter & operator++() noexcept {
 				auto next = this->remaining.find_first_not_of(this->delim);
 				if(next != std::string_view::npos)
 					this->remaining.remove_prefix(next);
@@ -409,7 +409,7 @@ namespace vore {
 			constexpr T begin() const noexcept { return this->b; }
 			constexpr T end() const noexcept { return this->e; }
 			constexpr std::size_t size() const noexcept { return this->e - this->b; }
-			constexpr decltype(*(T{})) & operator[](std::size_t i) noexcept { return *(this->b + i); }
+			constexpr decltype(*(T{})) & operator[](std::size_t i) const noexcept { return *(this->b + i); }
 		};
 
 
@@ -497,21 +497,18 @@ static const constexpr std::pair<std::string_view, std::string_view> CROND2TIMER
     {"sysstat"sv, "sysstat-collect"sv},
 };
 
-/*def which(exe:str, paths:Optional[str]=None) -> Optional[str]:
-    if paths is None:
-        paths = os.environ.get('PATH', '/usr/bin:/bin')
-    for path in paths.split(os.pathsep):
-        try:
-            abspath = os.path.join(path, exe)
-            statbuf = os.stat(abspath)
-        except:
-            continue
-        if stat.S_IMODE(statbuf.st_mode) & 0o111:
-            return abspath
+static auto which(const std::string_view & exe, std::optional<std::string_view> paths = {}) -> std::optional<std::string> {
+	if(!paths)
+		paths = std::getenv("PATH") ?: "/usr/bin:/bin";
+	for(auto path : vore::soft_tokenise{*paths, ":"sv}) {
+		auto abspath = (std::string{path} += '/') += exe;
+		if(!access(abspath.c_str(), X_OK))
+			return abspath;
+	}
+	return {};
+}
 
-    return None*/
-
-static const bool HAS_SENDMAIL = true;  // TODO: bool(which('sendmail', '/usr/sbin:/usr/lib'));
+static const bool HAS_SENDMAIL = static_cast<bool>(which("sendmail", "/usr/sbin:/usr/lib"sv));
 static std::string_view TARGET_DIR;
 static std::string TIMERS_DIR;
 static std::optional<std::uint64_t> UPTIME;
@@ -556,6 +553,7 @@ struct Job {
 	std::string_view line;
 	std::vector<std::string_view> parts;
 	std::map<std::string_view, std::string_view> environment;
+	std::string environment_PATH_storage;  // borrowed into environment on expansion
 	std::string_view shell;
 	std::size_t random_delay;
 	std::string period;                       // either period or timespec
@@ -574,7 +572,46 @@ struct Job {
 	std::string unit_name;
 	std::string_view user;
 	std::optional<std::string> home;
-	vore::span<const std::string_view *> command;  // subview of parts
+	struct {
+		vore::span<const std::string_view *> command;  // subview of parts
+		std::optional<std::string> command0;           // except this is command[0] if set
+
+		struct command_iter {
+			using iterator_category = std::input_iterator_tag;
+			using difference_type   = void;
+			using value_type        = const std::string_view;
+			using pointer           = const std::string_view *;
+			using reference         = const std::string_view &;
+
+			vore::span<const std::string_view *> command;
+			std::optional<std::string_view> command0;
+
+			command_iter & operator++() noexcept {
+				if(this->command.size())
+					this->command0 = *command.b++;
+				else
+					this->command0 = {};
+				return *this;
+			}
+
+			constexpr bool operator==(const command_iter & rhs) const noexcept { return this->command0 == rhs.command0 && this->command.b == rhs.command.b; }
+			constexpr bool operator!=(const command_iter & rhs) const noexcept { return !(*this == rhs); }
+
+			constexpr const std::string_view & operator*() const noexcept { return *this->command0; }
+		};
+
+		constexpr command_iter begin() const noexcept { return {this->command, this->command0}; }
+		constexpr command_iter end() const noexcept { return {{this->command.e,this->command.e}, {}}; }
+		constexpr std::size_t size() const noexcept { return this->command.size() + static_cast<bool>(this->command0); }
+		constexpr std::string_view operator[](std::size_t i) const noexcept {
+			if(this->command0) {
+				if(!i)
+					return *this->command0;
+				--i;
+			}
+			return this->command[i];
+		}
+	} command;
 	std::string execstart;
 	bool valid;
 	std::optional<std::string_view> testremoved;  // view of line
@@ -601,7 +638,10 @@ struct Job {
 
 	auto log(Log priority, const char * message) -> void { ::log(priority, "%s in %.*s:%.*s", message, FORMAT_SV(this->filename), FORMAT_SV(this->line)); }
 
-	// auto which(pgm) -> Optional[str] { return which(pgm, self.environment.get('PATH')) }
+	auto which(const std::string_view &pgm) -> std::optional<std::string> {
+		auto itr = this->environment.find("PATH"sv);
+		return ::which(pgm, itr == std::end(this->environment) ? std::nullopt : std::optional{itr->second});
+	}
 
 	// decode some environment variables that influence the behaviour of systemd-cron itself
 	auto decode_environment(const std::map<std::string_view, std::string_view> & environment, bool default_persistent) -> void {
@@ -651,8 +691,8 @@ struct Job {
 		this->boot_delay = int_map(this->parts[1], err);
 		if(err)
 			this->log(Log::WARNING, "invalid DELAY");
-		this->command.b = &*(this->parts.begin() + 3);
-		this->command.e = &*(this->parts.end());
+		this->command.command.b = &*(this->parts.begin() + 3);
+		this->command.command.e = &*(this->parts.end());
 	}
 
 	/*def parse_crontab_auto() -> None:
@@ -689,14 +729,14 @@ struct Job {
 
 		this->period = this->parts[0];
 		if(withuser) {
-			this->user      = this->parts[1];
-			this->command.b = &*(this->parts.begin() + 2);
+			this->user              = this->parts[1];
+			this->command.command.b = &*(this->parts.begin() + 2);
 		} else {
-			this->user      = this->basename;
-			this->command.b = &*(this->parts.begin() + 1);
+			this->user              = this->basename;
+			this->command.command.b = &*(this->parts.begin() + 1);
 		}
-		this->command.e = &*(this->parts.end());
-		this->jobid     = (std::string{this->basename} += '-') += this->user;
+		this->command.command.e = &*(this->parts.end());
+		this->jobid             = (std::string{this->basename} += '-') += this->user;
 	}
 
 	// 6 2 * * * (user) do something
@@ -726,14 +766,14 @@ struct Job {
 		}();
 
 		if(withuser) {
-			this->user      = this->parts[5];
-			this->command.b = &*(this->parts.begin() + 6);
+			this->user              = this->parts[5];
+			this->command.command.b = &*(this->parts.begin() + 6);
 		} else {
-			this->user      = this->basename;
-			this->command.b = &*(this->parts.begin() + 5);
+			this->user              = this->basename;
+			this->command.command.b = &*(this->parts.begin() + 5);
 		}
-		this->command.e = &*(this->parts.end());
-		this->jobid     = (std::string{this->basename} += '-') += this->user;
+		this->command.command.e = &*(this->parts.end());
+		this->jobid             = (std::string{this->basename} += '-') += this->user;
 	}
 
 	static const constexpr std::uint8_t TIMESPEC_ASTERISK = -1;
@@ -778,24 +818,34 @@ struct Job {
 				this->home = user->pw_dir;
 
 		if(this->home) {
-			//			if(this->command[0].starts_with("~/"sv)) // TODO: this also breaks optimussy!!
-			//				this->command[0].replace(0, 2, this->home);
+			if(this->command[0].starts_with("~/"sv)) {
+				*(this->command.command0 = *this->home) += this->command[0].substr(1);
+				++this->command.command.b;
+			}
 
-			/*if 'PATH' in this->environment:
-			    parts = this->environment['PATH'].split(':')
-			    for i, part in enumerate(parts):
-			        if part.startswith('~/'):
-			            parts[i] = this->home + part[1:]
-			    this->environment['PATH'] = ':'.join(parts)
-			    */
+			if(auto itr = this->environment.find("PATH"sv); itr != std::end(this->environment))
+				if(itr->second.starts_with("~/") || itr->second.find(":~/"sv) != std::string_view::npos) {
+					for(auto && path : vore::soft_tokenise{itr->second, ":"sv}) {
+						if(path.starts_with("~/")) {
+							this->environment_PATH_storage += *this->home;
+							this->environment_PATH_storage += path.substr(1);
+						} else
+							this->environment_PATH_storage += path;
+						this->environment_PATH_storage += ':';
+					}
+					this->environment_PATH_storage.pop_back();
+					this->environment["PATH"sv] = this->environment_PATH_storage;
+				}
 		}
 
 		if(!std::binary_search(std::begin(KSH_SHELLS), std::end(KSH_SHELLS), vore::basename(this->shell)))
 			return;
 
-		// pgm = this->which(this->command[0]);
-		// if(pgm && pgm != this->command[0])  // TODO: this violates optimussy
-		//	this->command[0] = pgm;
+		if(auto pgm = this->which(this->command[0]); pgm && *pgm != this->command[0]) {
+			if(!this->command.command0)
+				++this->command.command.b;
+			this->command.command0 = std::move(pgm);
+		}
 
 		/*if(this->command.size() >= 3 && this->command[-2] == '>' && this->command[-1] == '/dev/null')
 		  this->command = this->command [0:-2];
@@ -1004,7 +1054,7 @@ struct Job {
 		std::fputs("\"\n", into);
 		std::fputs("Documentation=man:systemd-crontab-generator(8)\n", into);
 		if(inject)
-		std::fputs(inject, into);
+			std::fputs(inject, into);
 		if(this->filename != "-"sv)
 			std::fprintf(into, "SourcePath=%.*s\n", FORMAT_SV(this->filename));
 	}
@@ -1466,7 +1516,7 @@ static auto realmain() -> int {
 				job.persistent = true;
 				job.period     = period;
 				job.boot_delay = i * 5;
-				job.command    = {&command, &command + 1};
+				job.command    = {{&command, &command + 1}, {}};
 				job.jobid      = (std::string{period} += '-') += basename;
 				job.decode();  // ensure clean jobid
 				job.generate_schedule();
