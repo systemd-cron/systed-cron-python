@@ -601,7 +601,7 @@ struct Job {
 		};
 
 		constexpr command_iter begin() const noexcept { return {this->command, this->command0}; }
-		constexpr command_iter end() const noexcept { return {{this->command.e,this->command.e}, {}}; }
+		constexpr command_iter end() const noexcept { return {{this->command.e, this->command.e}, {}}; }
 		constexpr std::size_t size() const noexcept { return this->command.size() + static_cast<bool>(this->command0); }
 		constexpr std::string_view operator[](std::size_t i) const noexcept {
 			if(this->command0) {
@@ -638,7 +638,7 @@ struct Job {
 
 	auto log(Log priority, const char * message) -> void { ::log(priority, "%s in %.*s:%.*s", message, FORMAT_SV(this->filename), FORMAT_SV(this->line)); }
 
-	auto which(const std::string_view &pgm) -> std::optional<std::string> {
+	auto which(const std::string_view & pgm) -> std::optional<std::string> {
 		auto itr = this->environment.find("PATH"sv);
 		return ::which(pgm, itr == std::end(this->environment) ? std::nullopt : std::optional{itr->second});
 	}
@@ -813,9 +813,17 @@ struct Job {
 
 	// perform smart substitutions for known shells
 	auto decode_command() -> void {
-		if(!this->home)
-			if(auto user = getpwnam(MAYBE_DUPA(this->user)))  // TODO: cache?
-				this->home = user->pw_dir;
+		if(!this->home) {
+			static std::map<std::string, std::string, std::less<>> pwnam_cache;
+			auto itr = pwnam_cache.find(this->user);
+			if(itr == std::end(pwnam_cache)) {
+				std::string user{this->user};
+				if(auto ent = getpwnam(user.data()))
+					itr = pwnam_cache.emplace(std::move(user), ent->pw_dir).first;
+			}
+			if(itr != std::end(pwnam_cache))
+				this->home = itr->second;
+		}
 
 		if(this->home) {
 			if(this->command[0].starts_with("~/"sv)) {
