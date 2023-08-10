@@ -1,448 +1,5 @@
-#include <algorithm>
-#include <cassert>
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <iterator>
-#include <limits>
-#include <map>
-#include <optional>
-#include <pwd.h>
-#include <regex.h>
-#include <set>
-#include <stdarg.h>
-#include <string>
-#include <string_view>
-#include <strings.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <utility>
-#include <vector>
-#if __has_include(<alloca.h>)
-#include <alloca.h>
-#endif
-
-using namespace std::literals;
-
-namespace vore::file {
-	namespace {
-		template <class C = char>
-		class mapping {
-		public:
-			constexpr mapping() noexcept {}
-
-			mapping(void * addr, std::size_t length, int prot, int flags, int fd, off_t offset) noexcept {
-				void * ret = mmap(addr, length, prot, flags, fd, offset);
-				if(ret != MAP_FAILED) {
-					static_assert(sizeof(C) == 1);
-					this->map    = {static_cast<C *>(ret), length};
-					this->opened = true;
-				}
-			}
-
-			mapping(const mapping &) = delete;
-			constexpr mapping(mapping && oth) noexcept : map(oth.map), opened(oth.opened) { oth.opened = false; }
-
-			constexpr mapping & operator=(mapping && oth) noexcept {
-				this->map    = oth.map;
-				this->opened = oth.opened;
-				oth.opened   = false;
-				return *this;
-			}
-
-			~mapping() {
-				if(this->opened)
-					munmap(const_cast<C *>(this->map.data()), this->map.size());
-			}
-
-			constexpr operator bool() const noexcept { return !this->map.empty(); }
-			constexpr operator std::basic_string_view<C>() const noexcept { return this->map; }
-			constexpr const std::basic_string_view<C> & operator*() const noexcept { return this->map; }
-			constexpr const std::basic_string_view<C> * operator->() const noexcept { return &this->map; }
-
-
-		private:
-			std::basic_string_view<C> map = {};
-			bool opened                   = false;
-		};
-	}
-}
-
-namespace vore {
-	namespace {
-		template <class CharT, class Traits>
-		constexpr std::basic_string_view<CharT, Traits> basename(std::basic_string_view<CharT, Traits> str) noexcept {
-			if(size_t idx = str.rfind('/'); idx != std::basic_string_view<CharT, Traits>::npos)
-				str.remove_prefix(idx + 1);
-
-			return std::move(str);
-		}
-	}
-}
-
-
-namespace vore::file {
-	namespace {
-		template <bool allow_stdio>
-		class fd {
-			template <bool as>
-			friend class FILE;
-
-		public:
-			static constexpr fd<allow_stdio> faux(int desc) noexcept {
-				fd<allow_stdio> ret;
-				ret.desc   = desc;
-				ret.opened = false;
-				return ret;
-			}
-			static constexpr fd<allow_stdio> for_stdout() noexcept { return faux(1); }
-
-
-			constexpr fd() noexcept = default;
-			fd(const char * path, int flags, mode_t mode = 0, int from = AT_FDCWD) noexcept {
-				if constexpr(allow_stdio)
-					if(path[0] == '-' && !path[1]) {  // path == "-"sv but saves a strlen() call on libstdc++
-						switch(flags & O_ACCMODE) {
-							case O_RDONLY:
-								this->desc = 0;
-								return;
-							case O_WRONLY:
-								this->desc = 1;
-								return;
-							default:
-								errno = EINVAL;
-								return;
-						}
-					}
-
-				while((this->desc = openat(from, path, flags, mode)) == -1 && errno == EINTR)
-					;
-				this->opened = this->desc != -1;
-			}
-			fd(int desc) noexcept : desc(desc), opened(true) {}
-
-			fd(const fd &) = delete;
-			constexpr fd(fd && oth) noexcept { *this = std::move(oth); }
-
-			constexpr fd & operator=(fd && oth) noexcept {
-				this->swap(oth);
-				return *this;
-			}
-
-			~fd() {
-				if(this->opened)
-					close(this->desc);
-			}
-
-			constexpr operator int() const noexcept { return this->desc; }
-
-			int take() & noexcept {
-				this->opened = false;
-				return this->desc;
-			}
-
-			constexpr void swap(fd & oth) noexcept {
-				std::swap(this->desc, oth.desc);
-				std::swap(this->opened, oth.opened);
-			}
-
-		private:
-			int desc = -1;
-
-		public:
-			bool opened = false;
-		};
-
-		template <bool allow_stdio>
-		class FILE {
-		public:
-			constexpr FILE() noexcept = default;
-
-			FILE(const char * path, const char * opts) noexcept {
-				if constexpr(allow_stdio)
-					if(path[0] == '-' && !path[1]) {  // path == "-"sv but saves a strlen() call on libstdc++
-						if(opts[0] && opts[1] == '+') {
-							errno = EINVAL;
-							return;
-						}
-						switch(opts[0]) {
-							case 'r':
-								this->stream = stdin;
-								return;
-							case 'w':
-							case 'a':
-								this->stream = stdout;
-								return;
-							default:
-								errno = EINVAL;
-								return;
-						}
-					}
-
-				this->stream = std::fopen(path, opts);
-				this->opened = this->stream;
-			}
-
-			FILE(const FILE &) = delete;
-			constexpr FILE(FILE && oth) noexcept { *this = std::move(oth); }
-
-			FILE(int oth, const char * opts) noexcept : stream(oth != -1 ? fdopen(oth, opts) : nullptr), opened(this->stream) {}
-			FILE(fd<false> && oth, const char * opts) noexcept : FILE(static_cast<int>(oth), opts) {
-				if(this->stream)
-					oth.opened = false;
-			}
-
-			constexpr FILE & operator=(FILE && oth) noexcept {
-				this->swap(oth);
-				return *this;
-			}
-
-			~FILE() {
-				if(this->opened)
-					std::fclose(this->stream);
-			}
-
-			constexpr operator ::FILE *() const noexcept { return this->stream; }
-
-			constexpr void swap(FILE & oth) noexcept {
-				std::swap(this->stream, oth.stream);
-				std::swap(this->opened, oth.opened);
-			}
-
-			constexpr ::FILE * leak() && noexcept {
-				this->opened = false;
-				return this->stream;
-			}
-
-		private:
-			::FILE * stream = nullptr;
-			bool opened     = false;
-		};
-
-		template <bool = false>
-		FILE(fd<false> &&, const char *) -> FILE<false>;
-	}
-}
-namespace vore::file {
-	namespace {
-		struct DIR_iter {
-			::DIR * stream{};
-			struct dirent * entry{};
-
-
-			DIR_iter & operator++() noexcept {
-				if(this->stream)
-					do
-						this->entry = readdir(this->stream);
-					while(this->entry &&
-					      ((this->entry->d_name[0] == '.' && this->entry->d_name[1] == '\0') ||  // this->entry == "."sv || this->entry == ".."sv, but saves trips to libc
-					       (this->entry->d_name[0] == '.' && this->entry->d_name[1] == '.' && this->entry->d_name[2] == '\0')));
-				return *this;
-			}
-
-			DIR_iter operator++(int) noexcept {
-				const auto ret = *this;
-				++(*this);
-				return ret;
-			}
-
-			constexpr bool operator==(const DIR_iter & rhs) const noexcept { return this->entry == rhs.entry; }
-			constexpr bool operator!=(const DIR_iter & rhs) const noexcept { return !(*this == rhs); }
-
-			constexpr const dirent & operator*() const noexcept { return *this->entry; }
-		};
-
-
-		class DIR {
-		public:
-			using iterator = DIR_iter;
-
-
-			DIR(const char * path) noexcept {
-				this->stream = opendir(path);
-				this->opened = this->stream;
-			}
-
-			DIR(int at, const char * path, int flags = 0) noexcept {
-				if(auto fd = openat(at, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | flags); fd != -1)
-					this->stream = fdopendir(fd);
-				this->opened = this->stream;
-			}
-
-			DIR(const DIR &) = delete;
-			constexpr DIR(DIR && oth) noexcept : stream(oth.stream), opened(oth.opened) { oth.opened = false; }
-
-			~DIR() {
-				if(this->opened)
-					closedir(this->stream);
-			}
-
-			constexpr operator ::DIR *() const noexcept { return this->stream; }
-
-
-			iterator begin() const noexcept { return ++iterator{this->stream}; }
-			constexpr iterator end() const noexcept { return {}; }
-
-		private:
-			::DIR * stream = nullptr;
-			bool opened    = false;
-		};
-	}
-}
-
-namespace vore {
-	namespace {
-		struct soft_tokenise_iter {  // merge_seps = true
-			using iterator_category = std::input_iterator_tag;
-			using difference_type   = void;
-			using value_type        = std::string_view;
-			using pointer           = std::string_view *;
-			using reference         = std::string_view &;
-
-			std::string_view delim;
-			std::string_view remaining;
-			std::string_view token = {};
-
-
-			soft_tokenise_iter & operator++() noexcept {
-				auto next = this->remaining.find_first_not_of(this->delim);
-				if(next != std::string_view::npos)
-					this->remaining.remove_prefix(next);
-				auto len = this->remaining.find_first_of(this->delim);
-				if(len != std::string_view::npos) {
-					this->token = {this->remaining.data(), len};
-					this->remaining.remove_prefix(len);
-				} else {
-					this->token     = this->remaining;
-					this->remaining = {};
-				}
-				return *this;
-			}
-
-			soft_tokenise_iter operator++(int) noexcept {
-				const auto ret = *this;
-				++(*this);
-				return ret;
-			}
-
-			constexpr bool operator==(const soft_tokenise_iter & rhs) const noexcept { return this->token == rhs.token; }
-			constexpr bool operator!=(const soft_tokenise_iter & rhs) const noexcept { return !(*this == rhs); }
-
-			constexpr std::string_view operator*() const noexcept { return this->token; }
-		};
-
-
-		struct soft_tokenise {
-			using iterator = soft_tokenise_iter;
-
-
-			std::string_view str;
-			std::string_view delim;
-
-
-			iterator begin() noexcept { return ++iterator{this->delim, this->str}; }
-			constexpr iterator end() const noexcept { return {}; }
-		};
-	}
-}
-
-
-#ifndef strndupa
-#define strndupa(str, maxlen)                                      \
-	__extension__({                                                  \
-		auto _strdupa_str = str;                                       \
-		auto len          = strnlen(_strdupa_str, maxlen);             \
-		auto ret          = reinterpret_cast<char *>(alloca(len + 1)); \
-		std::memcpy(ret, _strdupa_str, len);                           \
-		ret[len] = '\0';                                               \
-		ret;                                                           \
-	})
-#endif
-
-
-#define MAYBE_DUPA(strv)                                                       \
-	__extension__({                                                              \
-		auto && _strv = strv;                                                      \
-		_strv[_strv.size()] ? strndupa(_strv.data(), _strv.size()) : _strv.data(); \
-	})
-
-
-namespace vore {
-	namespace {
-		template <int base = 0, class T>
-		bool parse_uint(const char * val, T & out) {
-			if(val[0] == '\0')
-				return errno = EINVAL, false;
-			if(val[0] == '-')
-				return errno = ERANGE, false;
-
-			char * end{};
-			errno    = 0;
-			auto res = std::strtoull(val, &end, base);
-			out      = res;
-			if(errno)
-				return false;
-			if(res > std::numeric_limits<T>::max())
-				return errno = ERANGE, false;
-			if(*end != '\0')
-				return errno = EINVAL, false;
-
-			return true;
-		}
-	}
-}
-
-namespace vore {
-	namespace {
-		template <class T>
-		struct span {
-			T b, e;
-
-			constexpr T begin() const noexcept { return this->b; }
-			constexpr T end() const noexcept { return this->e; }
-			constexpr std::size_t size() const noexcept { return this->e - this->b; }
-			constexpr decltype(*(T{})) & operator[](std::size_t i) const noexcept { return *(this->b + i); }
-		};
-
-
-		template <class T>
-		span(T, T) -> span<T>;
-	}
-}
-
-namespace vore {
-	namespace {
-		template <class I, class T>
-		I binary_find(I begin, I end, const T & val) {  // std::binary_search() but returns the iterator instead
-			begin = std::lower_bound(begin, end, val);
-			return (!(begin == end) && !(val < *begin)) ? begin : end;
-		}
-		template <class I, class T, class Compare>
-		I binary_find(I begin, I end, const T & val, Compare comp) {
-			begin = std::lower_bound(begin, end, val, comp);
-			return (!(begin == end) && !comp(val, *begin)) ? begin : end;
-		}
-	}
-}
-
-namespace vore {
-	namespace {
-		template <class... Ts>
-		struct overload : Ts... {
-			using Ts::operator()...;
-		};
-		template <class... Ts>
-		overload(Ts...) -> overload<Ts...>;
-	}
-}
+#include "libvoreutils.h"
+#include <openssl/evp.h>
 static const constexpr auto key_or_plain = [](auto && lhs, auto && rhs) {
 	static const constexpr auto key =
 	    vore::overload{[](const std::string_view & s) { return s; }, [](const std::pair<std::string_view, std::string_view> & kv) { return kv.first; }};
@@ -469,10 +26,7 @@ static const constexpr std::uint8_t MONTHS_SET[]   = {1, 2, 3, 4, 5, 6, 7, 8, 9,
 static const constexpr std::string_view KSH_SHELLS[] = {"bash"sv, "dash"sv, "ksh"sv, "sh"sv, "zsh"sv};  // keep sorted
 static const char * const REBOOT_FILE                = "/run/crond.reboot";
 
-static const constexpr std::string_view USE_LOGLEVELMAX = "@use_loglevelmax@"sv;
-static const constexpr bool USE_RUNPARTS                = false;  // "@use_runparts@" == "True";  // TODO
-static const constexpr std::string_view BOOT_DELAY      = "@libexecdir@/systemd-cron/boot_delay"sv;
-#define STATEDIR "@statedir@"
+#include "configuration.h"
 
 static const char * SELF;
 static bool RUN_BY_SYSTEMD;
@@ -571,7 +125,7 @@ struct Job {
 	std::string jobid;  // should be cow
 	std::string unit_name;
 	std::string_view user;
-	std::optional<std::string> home;
+	std::optional<std::string_view> home;  // 'static
 	struct {
 		vore::span<const std::string_view *> command;  // subview of parts
 		std::optional<std::string> command0;           // except this is command[0] if set
@@ -831,7 +385,7 @@ struct Job {
 
 		if(this->home) {
 			if(this->command[0].starts_with("~/"sv)) {
-				*(this->command.command0 = *this->home) += this->command[0].substr(1);
+				this->command.command0 = std::string{ * this->home} += this->command[0].substr(1);
 				++this->command.command.b;
 			}
 
@@ -1110,7 +664,7 @@ struct Job {
 
 	auto generate_timer(FILE * into) -> void {
 		this->generate_unit_header(into, "Timer", "PartOf=cron.target\n");
-		// std::fputs("PartOf=cron.target\n", into);
+		// std::fputs("PartOf=cron.target\n", into); TODO: see generate_unit_header
 		if(this->testremoved)
 			std::fprintf(into, "ConditionFileIsExecutable=%.*s\n", FORMAT_SV(*this->testremoved));
 		std::fputc('\n', into);
@@ -1130,24 +684,44 @@ struct Job {
 		assert(!this->jobid.empty());
 		this->unit_name = ("cron-"s += this->jobid) += '-';
 		if(!this->persistent) {
+		plain:
 			char buf[20 + 1];  // 18446744073709551615
 			this->unit_name += std::string_view{buf, static_cast<std::size_t>(std::snprintf(buf, sizeof(buf), "%" PRIu64 "", seq++))};
 		} else {
-			// TODO: unit_id = hashlib.md5();
-			// TODO: unit_id.update(bytes('\0'.join([this->schedule] + this->command), 'utf-8'));  // rember about '  ' -> ' ' sus
-			// TODO:     unit_id = unit_id.hexdigest();
-			//  self.unit_name = "cron-%s-%s" % (self.jobid, unit_id)
+#define TRY_CRYPTO(...) \
+	if(!__VA_ARGS__)      \
+	goto plain
+			static EVP_MD_CTX * evp = [] {
+				auto evp = EVP_MD_CTX_new();
+				assert(evp);
+				return evp;
+			}();
+
+			TRY_CRYPTO(EVP_DigestInit_ex(evp, EVP_md5(), nullptr));
+			TRY_CRYPTO(EVP_DigestUpdate(evp, this->schedule.data(), this->schedule.size()));
+			for(auto && hunk : this->command) {
+				TRY_CRYPTO(EVP_DigestUpdate(evp, "", 1));  // NUL byte
+				TRY_CRYPTO(EVP_DigestUpdate(evp, hunk.data(), hunk.size()));
+			}
+
+			std::uint8_t hash[128 / 8];
+			TRY_CRYPTO(EVP_DigestFinal(evp, hash, nullptr));
+
+			char buf[(sizeof(hash) * 2) + 1], *cur = buf;
+			for(auto b : hash)
+				cur += std::sprintf(cur, "%02" PRIx8 "", b);
+			this->unit_name += std::string_view{buf, sizeof(buf) - 1};
 		}
 	}
 
 	// write the result in TARGET_DIR
 	auto output() -> void {
-#define OUTPUT_ERR(f, op)                                                               \
-	{                                                                                     \
-		char buf[512];                                                                      \
-		snprintf(buf, sizeof(buf), "%.*s: %s: %s", FORMAT_SV(f), op, std::strerror(errno)); \
-		this->log(Log::ERR, buf);                                                           \
-		return;                                                                             \
+#define OUTPUT_ERR(f, op)                                                                    \
+	{                                                                                          \
+		char buf[512];                                                                           \
+		std::snprintf(buf, sizeof(buf), "%.*s: %s: %s", FORMAT_SV(f), op, std::strerror(errno)); \
+		this->log(Log::ERR, buf);                                                                \
+		return;                                                                                  \
 	}
 		assert(!this->unit_name.empty());
 
@@ -1178,7 +752,6 @@ struct Job {
 			if(std::ferror(t) || std::fflush(t))
 				OUTPUT_ERR(timer, "write");
 		}
-		// TODO: dirfd for timers_dir and target_dir instead of string shit
 
 		if(symlink(timer.c_str(), (((std::string{TIMERS_DIR} += '/') += this->unit_name) += ".timer"sv).c_str()) == -1 && errno != EEXIST)
 			OUTPUT_ERR(timer, "link");
@@ -1287,31 +860,15 @@ static auto parse_crontab(std::string_view filename, bool withuser, bool monoton
 	}
 	return true;
 }
-/*with open(filename, 'rb') as f:
-    for rawline in f.readlines():
-        rawline = rawline.strip()
-        if not rawline or rawline.startswith(b'#'):
-            continue
+// try:  # TODO: NOTE: this damages the line potentially
+//     line = rawline.decode('utf8')
+// except UnicodeDecodeError:
+//     # let's hope it's in a trailing comment
+//     try:
+//         line = rawline.split(b'#')[0].decode('utf8')
+//     except UnicodeDecodeError:
+//         line = rawline.decode('ascii', 'replace')
 
-        #try:  # TODO: NOTE: this damages the line potentially
-        #    line = rawline.decode('utf8')
-        #except UnicodeDecodeError:
-        #    # let's hope it's in a trailing comment
-        #    try:
-        #        line = rawline.split(b'#')[0].decode('utf8')
-        #    except UnicodeDecodeError:
-        #        line = rawline.decode('ascii', 'replace')
-
-        #while '  ' in line:  # TODO: NOTE: disabled
-        #    line = line.replace('  ', ' ')
-
-        envvar = ENVVAR_RE.match(line)
-        if envvar:
-            key = envvar.group(1)
-            # value = envvar.group(2)
-            # value = value.strip("'").strip('"').strip(' ')
-            environment[key] = value
-            continue*/
 
 static auto int_map(const std::string_view & str, bool & err) -> std::size_t {
 	std::size_t ret = -1;
@@ -1399,13 +956,15 @@ static auto generate_timer_unit(Job & job) -> void {
 
 // schedule rerun of generators after /var is mounted
 static auto workaround_var_not_mounted() -> bool {  // TODO: good error reporting
-	if(vore::file::FILE<false> f{(std::string{TARGET_DIR} += "/cron-after-var.service"sv).c_str(), "we"}) {
+	auto service = std::string{TARGET_DIR} += "/cron-after-var.service"sv;
+	if(vore::file::FILE<false> f{service.c_str(), "we"}) {
 		std::fputs("[Unit]\n"
 		           "Description=Rerun systemd-crontab-generator because /var is a separate mount\n"
 		           "Documentation=man:systemd.cron(7)\n"
 		           "After=cron.target\n"
 		           "ConditionDirectoryNotEmpty=" STATEDIR "\n"
-		           "\n[Service]\n"
+		           "\n"
+		           "[Service]\n"
 		           "Type=oneshot\n"
 		           "ExecStart=/bin/sh -c \"systemctl daemon-reload ; systemctl try-restart cron.target\"\n",
 		           f);
@@ -1416,13 +975,10 @@ static auto workaround_var_not_mounted() -> bool {  // TODO: good error reportin
 		return false;
 
 	auto MULTIUSER_DIR = std::string{TARGET_DIR} += "/multi-user.target.wants"sv;
-	// try://TODO
-	//    os.makedirs(MULTIUSER_DIR)
-	// except OSError as e:
-	//    if e.errno != errno.EEXIST:
-	//        raise
+	if(mkdir(MULTIUSER_DIR.c_str(), 0777) == -1 && errno != EEXIST)
+		return false;
 
-	if(symlink((std::string{TARGET_DIR} += "/cron-after-var.service"sv).c_str(), (MULTIUSER_DIR += "/cron-after-var.service"sv).c_str()) && errno != EEXIST)
+	if(symlink(service.c_str(), (MULTIUSER_DIR += "/cron-after-var.service"sv).c_str()) && errno != EEXIST)
 		return false;
 	return true;
 }
@@ -1460,12 +1016,20 @@ static auto is_backup(const std::string_view & name) -> bool {
 	return name[0] == '.' || name.find('~') != std::string_view::npos || name.find(".dpkg-"sv) != std::string_view::npos;
 }
 
+static auto mkdirp(const std::string_view & path) -> bool {
+	for(auto && seg : vore::soft_tokenise{path, "/"}) {
+		std::string_view up_to_now{std::begin(path), std::end(seg)};
+		if(mkdir(MAYBE_DUPA(up_to_now), 0777) == -1 && errno != EEXIST)
+			return false;
+	}
+	return true;
+}
+
 static auto realmain() -> int {
-	// try: // TODO
-	//     os.makedirs(TIMERS_DIR, exist_ok=True)
-	// except OSError as e:
-	//     if e.errno != errno.EEXIST:
-	//         raise
+	if(!mkdirp(TIMERS_DIR)) {
+		log(Log::ERR, "making %.*s: %s", FORMAT_SV(TIMERS_DIR), std::strerror(errno));
+		return 1;
+	}
 
 	std::optional<std::string> fallback_mailto;
 
@@ -1476,12 +1040,13 @@ static auto realmain() -> int {
 			   log(Log::ERR, "truncated line in /etc/crontab: %.*s", FORMAT_SV(job.line));
 			   return;
 		   }
-		   // legacy boilerplate
-		   if(job.line.find("/etc/cron.hourly"sv) != std::string_view::npos ||  //
-		      job.line.find("/etc/cron.daily"sv) != std::string_view::npos ||   //
-		      job.line.find("/etc/cron.weekly"sv) != std::string_view::npos ||  //
-		      job.line.find("/etc/cron.monthly"sv) != std::string_view::npos)
-			   return;
+		   // legacy boilerplate: ignore lines mentioning non-disabled run-parts schedules
+		   for(auto && disableable_period : {"/etc/cron.hourly"sv, "/etc/cron.daily"sv, "/etc/cron.weekly"sv, "/etc/cron.monthly"sv}) {
+			   if(std::binary_search(std::begin(SCHEDULES_NOT), std::end(SCHEDULES_NOT), disableable_period.substr(std::strlen("/etc/cron."))))
+				   continue;
+			   if(job.line.find(disableable_period) != std::string_view::npos)
+				   return;
+		   }
 		   generate_timer_unit(job);
 	   })) {
 		// TODO: log errno

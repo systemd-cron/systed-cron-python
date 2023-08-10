@@ -198,6 +198,19 @@ else
 		sed -i $@ -e '/cron-$(schedule_all).timer/d' ${\n})
 endif
 
+comma = ,
+schedules_not_cpp := $(sort $(patsubst %,"%"sv$(comma)${\n},$(schedules_not)))
+$(builddir)/bin/configuration.h : $(srcdir)/bin/configuration.h.in Makefile
+	sed -e 's:#use_loglevelmax#:$(use_loglevelmax):' \
+	    -e 's:#use_runparts#:$(subst T,t,$(subst F,f,$(use_runparts))):' \
+	    -e 's:#libexecdir#:$(libexecdir):' \
+	    -e 's:#statedir#:$(statedir):' \
+	    -e 's:#schedules_not#:$(schedules_not_cpp):' $< > $@
+	# TODO: just make use_runparts be lowercase
+
+$(builddir)/bin/systemd-crontab-generatorq: $(srcdir)/bin/systemd-crontab-generator.cpp $(builddir)/bin/configuration.h
+	$(CXX) -Wall -Wextra $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -std=c++20 -I $(builddir)/bin @libcrypto@ $< -o $@
+
 $(builddir)/bin/systemd-crontab-generator: $(srcdir)/bin/systemd-crontab-generator.py
 	$(call in2out,$<,$@)
 ifneq ($(enable_runparts),no)
