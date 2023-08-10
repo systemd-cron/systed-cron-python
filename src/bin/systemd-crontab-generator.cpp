@@ -597,7 +597,11 @@ struct Job {
 			constexpr bool operator==(const command_iter & rhs) const noexcept { return this->command0 == rhs.command0 && this->command.b == rhs.command.b; }
 			constexpr bool operator!=(const command_iter & rhs) const noexcept { return !(*this == rhs); }
 
-			constexpr const std::string_view & operator*() const noexcept { return *this->command0; }
+			constexpr const std::string_view & operator*() noexcept {
+				if(!this->command0)
+					++*this;
+				return *this->command0;
+			}
 		};
 
 		constexpr command_iter begin() const noexcept { return {this->command, this->command0}; }
@@ -1545,7 +1549,7 @@ static auto realmain() -> int {
 			// TODO: log errno
 		}
 
-		if(struct stat sb; !stat(STATEDIR, &sb) || S_ISDIR(sb.st_mode)) {
+		if(struct stat sb; !stat(STATEDIR, &sb) && S_ISDIR(sb.st_mode)) {
 			// /var is avaible
 			for_each_file(STATEDIR, [&](std::string_view basename) {
 				if(basename.find('.') != std::string_view::npos)
