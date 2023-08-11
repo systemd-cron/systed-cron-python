@@ -24,3 +24,4 @@ comm -23 "${tmpdir}actual_stamps" "${tmpdir}needed_stamps" | while read -r stamp
 	mtime="$(stat -c'%Y' "$stamp")"
 	[ "$mtime" -lt $(( now - 10 * 86400 )) ] && rm -f "$stamp"
 done
+:
