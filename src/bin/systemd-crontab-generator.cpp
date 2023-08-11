@@ -368,8 +368,7 @@ struct Job {
 			base = *std::min_element(std::begin(values), std::end(values));
 
 		std::set<T> result;
-		// TODO: wrong split! :                 map(parse_period(mapping, base), value.split(','))
-		for(auto && subval : vore::soft_tokenise{value, ","sv})
+		for(auto && subval : vore::soft_tokenise{value, ","sv})  // TODO: NOTE: this glides over consecutive commas so "0,,3" is accepted as-if "0,3"
 			if(!parse_period(subval, values, result, mapping, base)) {
 				this->log(Log::ERR, "garbled time");
 				this->valid = false;
@@ -863,14 +862,6 @@ static auto parse_crontab(std::string_view filename, withuser_t withuser, bool m
 	}
 	return true;
 }
-// try:  # TODO: NOTE: this damages the line potentially
-//     line = rawline.decode('utf8')
-// except UnicodeDecodeError:
-//     # let's hope it's in a trailing comment
-//     try:
-//         line = rawline.split(b'#')[0].decode('utf8')
-//     except UnicodeDecodeError:
-//         line = rawline.decode('ascii', 'replace')
 
 
 static auto int_map(const std::string_view & str, bool & err) -> std::size_t {
@@ -958,7 +949,7 @@ static auto generate_timer_unit(Job & job) -> void {
 }
 
 // schedule rerun of generators after /var is mounted
-static auto workaround_var_not_mounted() -> bool {  // TODO: good error reporting
+static auto workaround_var_not_mounted() -> bool {
 	auto service = std::string{TARGET_DIR} += "/cron-after-var.service"sv;
 	if(vore::file::FILE<false> f{service.c_str(), "we"}) {
 		std::fputs("[Unit]\n"
@@ -1042,9 +1033,9 @@ static auto realmain() -> int {
 				   return;
 		   }
 		   generate_timer_unit(job);
-	   })) {
-		// TODO: log errno
-	}
+	   }))
+		log(Log::ERR, "%s: %s", "/etc/crontab", std::strerror(errno));
+
 
 	for_each_file("/etc/cron.d", [&](std::string_view basename) {
 		if(is_masked("/etc/cron.d", basename, {std::begin(CROND2TIMER), std::end(CROND2TIMER)}))
@@ -1062,9 +1053,8 @@ static auto realmain() -> int {
 			   if(fallback_mailto && job.environment.find("MAILTO"sv) == std::end(job.environment))
 				   job.environment.emplace("MAILTO"sv, *fallback_mailto);
 			   generate_timer_unit(job);
-		   })) {
-			// TODO: log errno
-		}
+		   }))
+			log(Log::ERR, "%s: %s", filename.c_str(), std::strerror(errno));
 	});
 
 	if(!USE_RUNPARTS) {
@@ -1104,9 +1094,8 @@ static auto realmain() -> int {
 				   return;
 			   }
 			   generate_timer_unit(job);
-		   })) {
-			// TODO: log errno
-		}
+		   }))
+			log(Log::ERR, "%s: %s", "/etc/anacrontab", std::strerror(errno));
 
 		if(struct stat sb; !stat(STATEDIR, &sb) && S_ISDIR(sb.st_mode)) {
 			// /var is avaible
@@ -1115,15 +1104,13 @@ static auto realmain() -> int {
 					return;
 
 				auto filename = (std::string{STATEDIR} += '/') += basename;
-				if(!parse_crontab(filename, withuser_t::from_basename, /*monotonic=*/false, [&](auto && job) { generate_timer_unit(job); })) {
-					// TODO: log errno
-				}
+				if(!parse_crontab(filename, withuser_t::from_basename, /*monotonic=*/false, [&](auto && job) { generate_timer_unit(job); }))
+					log(Log::ERR, "%s: %s", filename.c_str(), std::strerror(errno));
 			});
 			vore::file::fd<false>{REBOOT_FILE, O_WRONLY | O_CREAT | O_CLOEXEC, 0666};
 		} else {
 			if(!workaround_var_not_mounted())
-				// TODO: log errno
-				;
+				log(Log::WARNING, "%s: %s", "cron-after-var.service", std::strerror(errno));
 		}
 	}
 
@@ -1149,9 +1136,8 @@ static auto check(const char * cron_file) -> int {
 			   err = true;
 			   job.log(Log::ERR, "month and day can't be 0");
 		   }
-	   })) {
-		// TODO: log errno
-	}
+	   }))
+		log(Log::ERR, "%s: %s", cron_file, std::strerror(errno));
 	return err;
 }
 
