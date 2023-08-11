@@ -918,7 +918,7 @@ static auto parse_period(const std::string_view & value, const V & values, std::
 	}
 
 	if(range == "*"sv) {
-		for(std::size_t i = 0; i < std::distance(std::begin(values), std::end(values)); i += step)
+		for(ssize_t i = 0; i < std::distance(std::begin(values), std::end(values)); i += step)
 			into.emplace(values[i]);
 		return true;
 	}
