@@ -30,8 +30,8 @@ systemctl show --property=User --property=Environment "$unit" | {
 
 	for kv in $job_env; do
 		case "$kv" in
-			'MAILTO='*  )	mailto="${kv%'MAILTO='}"     ;;
-			'MAILFROM='*)	mailfrom="${kv%'MAILFROM='}" ;;
+			'MAILTO='*  )	mailto="${kv#'MAILTO='}"     ;;
+			'MAILFROM='*)	mailfrom="${kv#'MAILFROM='}" ;;
 		esac
 	done
 
