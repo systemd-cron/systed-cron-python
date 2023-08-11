@@ -598,7 +598,7 @@ struct Job {
 
 		auto scriptlet  = ((std::string{TARGET_DIR} += '/') += this->unit_name) += ".sh"sv;
 		this->execstart = (std::string{this->shell} += ' ') += scriptlet;
-		return std::move(scriptlet);
+		return scriptlet;
 	}
 
 	auto generate_unit_header(FILE * into, const char * tp, const char * inject) -> void {  // TODO: remove inject, just write it in caller; need for byte compat

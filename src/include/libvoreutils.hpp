@@ -85,7 +85,7 @@ namespace vore {
 			if(size_t idx = str.rfind('/'); idx != std::basic_string_view<CharT, Traits>::npos)
 				str.remove_prefix(idx + 1);
 
-			return std::move(str);
+			return str;
 		}
 	}
 }

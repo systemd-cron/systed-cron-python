@@ -160,7 +160,7 @@ namespace {
 }
 
 static auto replace_crontab(const char * cron_file, const char * user, FILE * from) -> bool {
-	autodeleting_path final_tmp_path{.armed = false};
+	autodeleting_path final_tmp_path{.buf = {}, .armed = false};
 	std::snprintf(final_tmp_path, sizeof(final_tmp_path.buf), "" CRONTAB_DIR "/%s.XXXXXX", user);
 
 	vore::file::FILE<false> final_tmp;
