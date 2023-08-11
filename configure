@@ -10,7 +10,7 @@ mandir='$(datadir)/man'
 docdir='$(datadir)/doc/$(package)'
 unitdir='$(libdir)/systemd/system'
 generatordir='$(libdir)/systemd/system-generators'
-libcrypto="$(pkgconf --cflags --libs libcrypto)" || libcrypto='-lcrypto'
+libcrypto="$(pkgconf --cflags --libs libcrypto)" 2>/dev/null || libcrypto='-lcrypto'
 enable_runparts=yes
 enable_setgid=no
 

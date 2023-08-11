@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: 0BSD
 // Derived from voreutils headers
+#pragma once
 
 #include <algorithm>
+#include <alloca.h>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -29,9 +31,6 @@
 #include <unistd.h>
 #include <utility>
 #include <vector>
-#if __has_include(<alloca.h>)
-#include <alloca.h>
-#endif
 
 using namespace std::literals;
 
@@ -100,15 +99,6 @@ namespace vore::file {
 			friend class FILE;
 
 		public:
-			static constexpr fd<allow_stdio> faux(int desc) noexcept {
-				fd<allow_stdio> ret;
-				ret.desc   = desc;
-				ret.opened = false;
-				return ret;
-			}
-			static constexpr fd<allow_stdio> for_stdout() noexcept { return faux(1); }
-
-
 			constexpr fd() noexcept = default;
 			fd(const char * path, int flags, mode_t mode = 0, int from = AT_FDCWD) noexcept {
 				if constexpr(allow_stdio)
@@ -167,6 +157,13 @@ namespace vore::file {
 		template <bool allow_stdio>
 		class FILE {
 		public:
+			static FILE tmpfile() noexcept {
+				FILE ret;
+				ret.stream = std::tmpfile();
+				ret.opened = ret.stream;
+				return ret;
+			}
+
 			constexpr FILE() noexcept = default;
 
 			FILE(const char * path, const char * opts) noexcept {
@@ -220,14 +217,11 @@ namespace vore::file {
 				std::swap(this->opened, oth.opened);
 			}
 
-			constexpr ::FILE * leak() && noexcept {
-				this->opened = false;
-				return this->stream;
-			}
-
 		private:
 			::FILE * stream = nullptr;
-			bool opened     = false;
+
+		public:
+			bool opened = false;
 		};
 
 		template <bool = false>
@@ -271,12 +265,6 @@ namespace vore::file {
 
 			DIR(const char * path) noexcept {
 				this->stream = opendir(path);
-				this->opened = this->stream;
-			}
-
-			DIR(int at, const char * path, int flags = 0) noexcept {
-				if(auto fd = openat(at, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | flags); fd != -1)
-					this->stream = fdopendir(fd);
 				this->opened = this->stream;
 			}
 
